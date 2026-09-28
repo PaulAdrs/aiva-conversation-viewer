@@ -1,0 +1,7 @@
+name = "aiva-conversation-viewer"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "81986b45ebf9409388d04c1134123a57"

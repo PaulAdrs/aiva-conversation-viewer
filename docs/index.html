@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AIVA Conversation Viewer</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --border: #e2e4e9;
+    --text: #1c1f26;
+    --muted: #6b7280;
+    --user: #eef2ff;
+    --assistant: #ecfdf5;
+    --tool: #fff7ed;
+    --accent: #3b5bdb;
+    --accent-hover: #2f4bc7;
+    --error: #c0392b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header .title h1 {
+    margin: 0 0 4px;
+    font-size: 18px;
+  }
+  header .title p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  header button.back {
+    padding: 8px 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  header button.back:hover { background: #f0f1f4; }
+  main {
+    padding: 24px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .card .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .card .name {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .card .meta {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+  .unlock-box {
+    max-width: 360px;
+    margin: 80px auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px;
+    text-align: center;
+  }
+  .unlock-box h1 {
+    font-size: 17px;
+    margin: 0 0 18px;
+  }
+  input[type="password"], input[type="text"] {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+  button.primary {
+    width: 100%;
+    padding: 10px 18px;
+    background: var(--accent);
+    border: none;
+    border-radius: 6px;
+    color: white;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.primary:hover { background: var(--accent-hover); }
+  button.primary:disabled { opacity: 0.6; cursor: default; }
+  .status {
+    color: var(--muted);
+    font-size: 14px;
+    margin-bottom: 16px;
+  }
+  .status.error { color: var(--error); }
+  .item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+    background: var(--panel);
+  }
+  .item .meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .item.message.user { background: var(--user); }
+  .item.message.assistant { background: var(--assistant); }
+  .item.tool { background: var(--tool); }
+  .item pre {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12.5px;
+    background: rgba(0,0,0,0.035);
+    padding: 8px;
+    border-radius: 6px;
+  }
+  .item .content {
+    font-size: 14px;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">
+    <h1 id="headerTitle">AIVA Conversation Viewer</h1>
+    <p id="headerSubtitle">Testing tool &mdash; browse an agent's recent calls and inspect each transcript.</p>
+  </div>
+  <button class="back" id="backBtn" hidden>&larr; Back</button>
+</header>
+<main>
+  <div id="unlockScreen" class="unlock-box">
+    <h1>Enter access code</h1>
+    <input type="password" id="accessCode" placeholder="Access code" />
+    <button class="primary" id="unlockBtn">Unlock</button>
+    <div id="unlockStatus" class="status"></div>
+  </div>
+
+  <div id="appScreen" hidden>
+    <div id="status" class="status"></div>
+    <div id="content"></div>
+  </div>
+</main>
+
+<script>
+  // Fill this in after deploying the Cloudflare Worker (wrangler deploy prints the URL).
+  const WORKER_URL = "https://aiva-conversation-viewer.b00784180.workers.dev";
+
+  let accessCode = "";
+  let selectedAgent = null; // { id, name }
+
+  const unlockScreen = document.getElementById("unlockScreen");
+  const appScreen = document.getElementById("appScreen");
+  const accessCodeInput = document.getElementById("accessCode");
+  const unlockBtn = document.getElementById("unlockBtn");
+  const unlockStatus = document.getElementById("unlockStatus");
+  const backBtn = document.getElementById("backBtn");
+  const statusEl = document.getElementById("status");
+  const contentEl = document.getElementById("content");
+  const headerSubtitle = document.getElementById("headerSubtitle");
+
+  unlockBtn.addEventListener("click", unlock);
+  accessCodeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") unlock(); });
+  backBtn.addEventListener("click", () => {
+    if (backBtn.dataset.target === "agents") loadAgents();
+    else if (backBtn.dataset.target === "conversations") loadConversations(selectedAgent);
+  });
+
+  async function unlock() {
+    const code = accessCodeInput.value.trim();
+    if (!code) return;
+    accessCode = code;
+    unlockBtn.disabled = true;
+    setUnlockStatus("Checking...", false);
+
+    // Any real endpoint doubles as the auth check; agents list is the cheapest.
+    const result = await apiFetch({ view: "agents" });
+    if (!result.ok) {
+      setUnlockStatus(result.error || "Invalid access code", true);
+      unlockBtn.disabled = false;
+      accessCode = "";
+      return;
+    }
+
+    unlockScreen.hidden = true;
+    appScreen.hidden = false;
+    renderAgents(result.data.agents);
+  }
+
+  function setUnlockStatus(text, isError) {
+    unlockStatus.textContent = text;
+    unlockStatus.className = "status" + (isError ? " error" : "");
+  }
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text;
+    statusEl.className = "status" + (isError ? " error" : "");
+  }
+
+  async function apiFetch(params) {
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const resp = await fetch(`${WORKER_URL}?${qs}`, {
+        headers: { "X-Access-Code": accessCode },
+      });
+      const data = await resp.json();
+      if (!resp.ok) return { ok: false, error: data.error || `Request failed (${resp.status})` };
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: `Network error: ${err.message}` };
+    }
+  }
+
+  async function loadAgents() {
+    selectedAgent = null;
+    backBtn.hidden = true;
+    headerSubtitle.textContent = "Select an agent.";
+    setStatus("Loading agents...", false);
+    contentEl.innerHTML = "";
+
+    const result = await apiFetch({ view: "agents" });
+    if (!result.ok) { setStatus(result.error, true); return; }
+    renderAgents(result.data.agents);
+  }
+
+  function renderAgents(agents) {
+    backBtn.hidden = true;
+    headerSubtitle.textContent = "Select an agent.";
+    setStatus(agents.length ? "" : "No agents found.", false);
+    contentEl.innerHTML = agents.map((a) => `
+      <div class="card" data-agent-id="${escapeHtml(a.id)}" data-agent-name="${escapeHtml(a.name)}">
+        <div class="row">
+          <span class="name">${escapeHtml(a.name)}</span>
+          <span class="badge">${escapeHtml(a.language || "")}</span>
+        </div>
+        <div class="meta">Updated ${a.updatedAt ? new Date(a.updatedAt).toLocaleString() : "unknown"}</div>
+      </div>
+    `).join("");
+
+    contentEl.querySelectorAll(".card").forEach((card) => {
+      card.addEventListener("click", () => {
+        loadConversations({ id: card.dataset.agentId, name: card.dataset.agentName });
+      });
+    });
+  }
+
+  async function loadConversations(agent) {
+    selectedAgent = agent;
+    backBtn.hidden = false;
+    backBtn.dataset.target = "agents";
+    headerSubtitle.textContent = `${agent.name} — recent calls`;
+    setStatus("Loading conversations...", false);
+    contentEl.innerHTML = "";
+
+    const result = await apiFetch({ view: "conversations", agentId: agent.id });
+    if (!result.ok) { setStatus(result.error, true); return; }
+    renderConversations(result.data.conversations);
+  }
+
+  function renderConversations(conversations) {
+    setStatus(conversations.length ? "" : "No conversations found for this agent.", false);
+    contentEl.innerHTML = conversations.map((c) => `
+      <div class="card" data-conversation-id="${escapeHtml(c.id)}">
+        <div class="row">
+          <span class="name">${escapeHtml(c.callId || c.id)}</span>
+          <span class="badge">${c.messageCount} messages</span>
+        </div>
+        <div class="meta">${c.phoneNumber ? escapeHtml(c.phoneNumber) + " &middot; " : ""}${new Date(c.createdAt).toLocaleString()} &middot; ${escapeHtml(c.status || "")}</div>
+      </div>
+    `).join("");
+
+    contentEl.querySelectorAll(".card").forEach((card) => {
+      card.addEventListener("click", () => loadTranscript(card.dataset.conversationId));
+    });
+  }
+
+  async function loadTranscript(conversationId) {
+    backBtn.hidden = false;
+    backBtn.dataset.target = "conversations";
+    headerSubtitle.textContent = `${selectedAgent.name} — call transcript`;
+    setStatus("Loading transcript...", false);
+    contentEl.innerHTML = "";
+
+    const result = await apiFetch({ conversationId });
+    if (!result.ok) { setStatus(result.error, true); return; }
+    const { conversation, toolCalls } = result.data;
+    renderTimeline(conversation, toolCalls);
+    setStatus(`Loaded ${conversation.messages.length} messages and ${toolCalls.length} tool calls.`, false);
+  }
+
+  function renderTimeline(conversation, toolCalls) {
+    const items = [];
+
+    for (const m of conversation.messages) {
+      items.push({ type: "message", role: m.role, createdAt: m.createdAt, content: m.content });
+    }
+    for (const t of toolCalls) {
+      items.push({ type: "tool", createdAt: t.requestedAt || t.respondedAt, call: t });
+    }
+
+    items.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    contentEl.innerHTML = items.map(renderItem).join("");
+  }
+
+  function renderItem(item) {
+    const time = new Date(item.createdAt).toLocaleString();
+
+    if (item.type === "message") {
+      return `
+        <div class="item message ${escapeHtml(item.role)}">
+          <div class="meta">${escapeHtml(item.role)} &middot; ${time}</div>
+          <div class="content">${escapeHtml(item.content)}</div>
+        </div>
+      `;
+    }
+
+    const call = item.call;
+    return `
+      <div class="item tool">
+        <div class="meta">tool call: ${escapeHtml(call.name)} ${call.outcome ? `(${escapeHtml(call.outcome)})` : ""} &middot; ${time}</div>
+        <div class="content">Arguments:</div>
+        <pre>${escapeHtml(prettyPrint(call.arguments))}</pre>
+        <div class="content">Result:</div>
+        <pre>${escapeHtml(prettyPrint(call.result))}</pre>
+      </div>
+    `;
+  }
+
+  function prettyPrint(value) {
+    if (value === undefined) return "(none)";
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  function escapeHtml(str) {
+    return String(str ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+</script>
+</body>
+</html>
