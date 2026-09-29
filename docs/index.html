@@ -163,6 +163,30 @@
   }
   button.primary:hover { opacity: 0.88; }
   button.primary:disabled { opacity: 0.5; cursor: default; }
+  button.secondary {
+    padding: 0 16px;
+    height: 38px;
+    background: transparent;
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button.secondary:hover { border-color: var(--surface-brand); color: var(--text-brand); }
+  button.secondary:disabled { opacity: 0.5; cursor: default; }
+  .toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
   .status {
     color: var(--text-secondary);
     font-size: 14px;
@@ -224,7 +248,10 @@
   </div>
 
   <div id="appScreen" hidden>
-    <div id="status" class="status"></div>
+    <div class="toolbar">
+      <div id="status" class="status" style="margin-bottom:0;"></div>
+      <button class="secondary" id="exportBtn" hidden>Export all calls</button>
+    </div>
     <div id="content"></div>
   </div>
 </main>
@@ -242,9 +269,12 @@
   const unlockBtn = document.getElementById("unlockBtn");
   const unlockStatus = document.getElementById("unlockStatus");
   const backBtn = document.getElementById("backBtn");
+  const exportBtn = document.getElementById("exportBtn");
   const statusEl = document.getElementById("status");
   const contentEl = document.getElementById("content");
   const headerSubtitle = document.getElementById("headerSubtitle");
+
+  let currentConversations = [];
 
   unlockBtn.addEventListener("click", unlock);
   accessCodeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") unlock(); });
@@ -252,6 +282,7 @@
     if (backBtn.dataset.target === "agents") loadAgents();
     else if (backBtn.dataset.target === "conversations") loadConversations(selectedAgent);
   });
+  exportBtn.addEventListener("click", () => exportAllCalls(currentConversations));
 
   async function unlock() {
     const code = accessCodeInput.value.trim();
@@ -312,6 +343,7 @@
 
   function renderAgents(agents) {
     backBtn.hidden = true;
+    exportBtn.hidden = true;
     headerSubtitle.textContent = "Select an agent.";
     setStatus(agents.length ? "" : "No agents found.", false);
     contentEl.innerHTML = agents.map((a) => `
@@ -345,6 +377,10 @@
   }
 
   function renderConversations(conversations) {
+    currentConversations = conversations;
+    exportBtn.hidden = conversations.length === 0;
+    exportBtn.disabled = false;
+    exportBtn.textContent = "Export all calls";
     setStatus(conversations.length ? "" : "No conversations found for this agent.", false);
     contentEl.innerHTML = conversations.map((c) => `
       <div class="card" data-conversation-id="${escapeHtml(c.id)}">
@@ -363,6 +399,7 @@
 
   async function loadTranscript(conversationId) {
     backBtn.hidden = false;
+    exportBtn.hidden = true;
     backBtn.dataset.target = "conversations";
     headerSubtitle.textContent = `${selectedAgent.name} — call transcript`;
     setStatus("Loading transcript...", false);
@@ -412,6 +449,74 @@
         <pre>${escapeHtml(prettyPrint(call.result))}</pre>
       </div>
     `;
+  }
+
+  const EXPORT_CONCURRENCY = 4;
+
+  async function exportAllCalls(conversations) {
+    if (!conversations.length) return;
+
+    exportBtn.disabled = true;
+    const results = new Array(conversations.length);
+    let done = 0;
+    let failed = 0;
+
+    const updateProgress = () => {
+      setStatus(`Exporting calls... ${done}/${conversations.length}${failed ? ` (${failed} failed)` : ""}`, false);
+      exportBtn.textContent = `Exporting ${done}/${conversations.length}...`;
+    };
+    updateProgress();
+
+    let nextIndex = 0;
+    async function worker() {
+      while (nextIndex < conversations.length) {
+        const i = nextIndex++;
+        const summary = conversations[i];
+        const result = await apiFetch({ conversationId: summary.id });
+        if (result.ok) {
+          results[i] = {
+            callId: summary.callId,
+            phoneNumber: summary.phoneNumber,
+            status: summary.status,
+            conversation: result.data.conversation,
+            toolCalls: result.data.toolCalls,
+          };
+        } else {
+          failed++;
+          results[i] = { callId: summary.callId, error: result.error };
+        }
+        done++;
+        updateProgress();
+      }
+    }
+
+    const workers = Array.from({ length: Math.min(EXPORT_CONCURRENCY, conversations.length) }, worker);
+    await Promise.all(workers);
+
+    downloadJson(
+      { agent: selectedAgent.name, exportedAt: new Date().toISOString(), calls: results },
+      `${slugify(selectedAgent.name)}-calls-${new Date().toISOString().slice(0, 10)}.json`
+    );
+
+    exportBtn.disabled = false;
+    exportBtn.textContent = "Export all calls";
+    setStatus(`Exported ${done - failed}/${conversations.length} calls${failed ? ` (${failed} failed)` : ""}.`, failed > 0);
+  }
+
+  function downloadJson(data, filename) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function slugify(str) {
+    return String(str ?? "agent").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "agent";
   }
 
   function prettyPrint(value) {
