@@ -429,6 +429,15 @@
   let visitedPages = 1;
   let lastHasMore = false;
 
+  // The admin API has no total-count field — listConversations only ever
+  // says "here's a page, and whether there's more". The only way to know
+  // the real total page count is to walk every page once and count, which
+  // costs one request per page. So: show page 1 immediately, and fill in
+  // the full "1 2 3 ... 8 9" pager a moment later once that background
+  // walk finishes — cached per agent so it's instant after the first time.
+  let agentTotalPagesCache = {}; // agentId -> { totalPages, exact }
+  const COUNT_MAX_PAGES = 50; // ~1000 conversations at the current page size; beyond this we just label the last known page "N+"
+
   unlockBtn.addEventListener("click", unlock);
   accessCodeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") unlock(); });
   backBtn.addEventListener("click", () => {
@@ -525,11 +534,13 @@
     });
   }
 
-  // Entry point when an agent is (re)selected — resets pagination to page 1.
+  // Entry point when an agent is (re)selected — resets pagination to page 1
+  // and kicks off the background total-page count (unless already cached).
   async function loadConversations(agent) {
     pageCursors = [null];
     visitedPages = 1;
     await loadConversationsPage(agent, 1);
+    ensureTotalPagesKnown(agent);
   }
 
   async function loadConversationsPage(agent, pageNum) {
@@ -559,6 +570,33 @@
     renderPaginationTabs();
   }
 
+  // Walks every page of this agent's conversations just to count them —
+  // the only way to get a total, since the API doesn't expose one. Runs
+  // in the background; doesn't block showing page 1. Capped so a
+  // call-heavy agent doesn't turn into a very long background walk.
+  function ensureTotalPagesKnown(agent) {
+    if (agentTotalPagesCache[agent.id]) { renderPaginationTabs(); return; }
+    countTotalPages(agent).then((info) => {
+      agentTotalPagesCache[agent.id] = info;
+      if (selectedAgent && selectedAgent.id === agent.id) renderPaginationTabs();
+    });
+  }
+
+  async function countTotalPages(agent) {
+    let cursor = undefined;
+    for (let pages = 0; pages < COUNT_MAX_PAGES; ) {
+      const params = { view: "conversations", agentId: agent.id };
+      if (cursor) params.after = cursor;
+      const result = await apiFetch(params);
+      pages++;
+      if (!result.ok) return { totalPages: Math.max(pages - 1, 1), exact: false };
+      const { hasMore, nextCursor } = result.data;
+      if (!hasMore || !nextCursor) return { totalPages: pages, exact: true };
+      cursor = nextCursor;
+    }
+    return { totalPages: COUNT_MAX_PAGES, exact: false };
+  }
+
   // Which page numbers to actually render as tabs, collapsing with "..."
   // once there are more than a handful — classic `1 2 ... 8 9` pager shape.
   function computePageList(current, maxPage) {
@@ -568,20 +606,27 @@
   }
 
   function renderPaginationTabs() {
-    if (visitedPages <= 1 && !lastHasMore) {
+    const cached = selectedAgent ? agentTotalPagesCache[selectedAgent.id] : null;
+    // Once the real total is known, it always wins — but if the user has
+    // clicked past a capped estimate, don't let the tab list shrink under them.
+    const maxPage = cached ? Math.max(cached.totalPages, visitedPages) : visitedPages;
+    const stillUnbounded = !cached && lastHasMore;
+
+    if (maxPage <= 1 && !stillUnbounded) {
       paginationTabsEl.hidden = true;
       return;
     }
 
-    const pages = computePageList(currentPageNum, visitedPages);
+    const pages = computePageList(currentPageNum, maxPage);
     let html = `<button class="page-tab" id="pagePrev" ${currentPageNum === 1 ? "disabled" : ""}>&lt;</button>`;
     let prev = 0;
     for (const p of pages) {
       if (p - prev > 1) html += `<span class="page-ellipsis">...</span>`;
-      html += `<button class="page-tab${p === currentPageNum ? " active" : ""}" data-page="${p}">${p}</button>`;
+      const isCappedEdge = cached && !cached.exact && p === cached.totalPages && p === maxPage;
+      html += `<button class="page-tab${p === currentPageNum ? " active" : ""}" data-page="${p}">${p}${isCappedEdge ? "+" : ""}</button>`;
       prev = p;
     }
-    const canGoNext = currentPageNum < visitedPages || (currentPageNum === visitedPages && lastHasMore);
+    const canGoNext = currentPageNum < maxPage || (currentPageNum === maxPage && lastHasMore);
     html += `<button class="page-tab" id="pageNext" ${canGoNext ? "" : "disabled"}>&gt;</button>`;
 
     paginationTabsEl.innerHTML = html;
