@@ -17,7 +17,7 @@ const LIST_CONVERSATIONS = `
   query listConversations($input: ListConversationsInput) {
     listConversations(input: $input) {
       items { id callId phoneNumber agentId createdAt status messages { id role } }
-      size hasMore
+      size hasMore lastEvaluatedKey
     }
   }
 `;
@@ -87,12 +87,14 @@ function isPayloadTooLarge(err) {
   return /payload size/i.test(err.message);
 }
 
-async function fetchConversationsPage(agentId, token, pageSize) {
+async function fetchConversationsPage(agentId, token, pageSize, lastEvaluatedKey) {
+  const input = { agentId, pageSize };
+  if (lastEvaluatedKey) input.lastEvaluatedKey = lastEvaluatedKey;
   try {
-    return await gql(LIST_CONVERSATIONS, { input: { agentId, pageSize } }, token);
+    return await gql(LIST_CONVERSATIONS, { input }, token);
   } catch (err) {
     if (isPayloadTooLarge(err) && pageSize > MIN_CONVERSATIONS_PAGE_SIZE) {
-      return fetchConversationsPage(agentId, token, Math.max(MIN_CONVERSATIONS_PAGE_SIZE, Math.floor(pageSize / 2)));
+      return fetchConversationsPage(agentId, token, Math.max(MIN_CONVERSATIONS_PAGE_SIZE, Math.floor(pageSize / 2)), lastEvaluatedKey);
     }
     throw err;
   }
@@ -283,7 +285,8 @@ async function handleListConversations(url, env, origin) {
     return jsonResponse({ error: 'Agent is outside the allowed company scope' }, 403, origin);
   }
 
-  const data = await fetchConversationsPage(agentId, token, CONVERSATIONS_PAGE_SIZE);
+  const after = url.searchParams.get('after') || undefined;
+  const data = await fetchConversationsPage(agentId, token, CONVERSATIONS_PAGE_SIZE, after);
   const items = (data.listConversations.items || [])
     .filter((c) => c.agentId === agentId)
     .map((c) => ({
@@ -296,7 +299,12 @@ async function handleListConversations(url, env, origin) {
     }));
 
   return jsonResponse(
-    { agentName: allowed.get(agentId).name, conversations: items, hasMore: data.listConversations.hasMore },
+    {
+      agentName: allowed.get(agentId).name,
+      conversations: items,
+      hasMore: data.listConversations.hasMore,
+      nextCursor: data.listConversations.lastEvaluatedKey || null,
+    },
     200,
     origin
   );

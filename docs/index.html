@@ -229,6 +229,94 @@
     white-space: pre-wrap;
     color: var(--text-primary);
   }
+  .pagination-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 16px;
+  }
+  .page-tab {
+    min-width: 34px;
+    height: 30px;
+    padding: 0 8px;
+    background: var(--surface-primary);
+    border: 0.5px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .page-tab:hover { border-color: var(--surface-brand); }
+  .page-tab.active {
+    background: var(--surface-brand);
+    border-color: var(--surface-brand);
+    color: var(--text-invert);
+  }
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(26,60,54,0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 10;
+  }
+  .modal {
+    width: 100%;
+    max-width: 360px;
+    background: var(--surface-primary);
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+  }
+  .modal h2 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 20px;
+    margin: 0 0 16px;
+    color: var(--text-primary);
+  }
+  .modal .option-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    margin-bottom: 10px;
+    cursor: pointer;
+  }
+  .modal .date-range {
+    display: flex;
+    gap: 10px;
+    margin: 4px 0 14px 24px;
+  }
+  .modal .date-range label {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .modal input[type="date"] {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--surface-primary);
+    border: 0.5px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: 13px;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 18px;
+  }
+  .modal-actions button.secondary, .modal-actions button.primary {
+    flex: 1;
+    width: auto;
+  }
 </style>
 </head>
 <body>
@@ -253,8 +341,38 @@
       <button class="secondary" id="exportBtn" hidden>Export all calls</button>
     </div>
     <div id="content"></div>
+    <div id="paginationTabs" class="pagination-tabs" hidden></div>
   </div>
 </main>
+
+<div id="exportModal" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2>Export all calls</h2>
+    <label class="option-row">
+      <input type="radio" name="exportRange" id="exportRangeAll" value="all" checked />
+      All time
+    </label>
+    <label class="option-row">
+      <input type="radio" name="exportRange" id="exportRangeCustom" value="custom" />
+      Custom date range
+    </label>
+    <div id="exportDateRange" class="date-range" hidden>
+      <div>
+        <label for="exportStart">From</label>
+        <input type="date" id="exportStart" />
+      </div>
+      <div>
+        <label for="exportEnd">To</label>
+        <input type="date" id="exportEnd" />
+      </div>
+    </div>
+    <div id="exportModalStatus" class="status"></div>
+    <div class="modal-actions">
+      <button class="secondary" id="exportCancelBtn">Cancel</button>
+      <button class="primary" id="exportConfirmBtn">Export</button>
+    </div>
+  </div>
+</div>
 
 <script>
   // Fill this in after deploying the Cloudflare Worker (wrangler deploy prints the URL).
@@ -272,17 +390,42 @@
   const exportBtn = document.getElementById("exportBtn");
   const statusEl = document.getElementById("status");
   const contentEl = document.getElementById("content");
+  const paginationTabsEl = document.getElementById("paginationTabs");
   const headerSubtitle = document.getElementById("headerSubtitle");
+  const exportModal = document.getElementById("exportModal");
+  const exportRangeAll = document.getElementById("exportRangeAll");
+  const exportRangeCustom = document.getElementById("exportRangeCustom");
+  const exportDateRange = document.getElementById("exportDateRange");
+  const exportStart = document.getElementById("exportStart");
+  const exportEnd = document.getElementById("exportEnd");
+  const exportModalStatus = document.getElementById("exportModalStatus");
+  const exportCancelBtn = document.getElementById("exportCancelBtn");
+  const exportConfirmBtn = document.getElementById("exportConfirmBtn");
 
-  let currentConversations = [];
+  // Pagination state for the conversations list currently on screen.
+  // pageCursors[i] is the "after" cursor needed to fetch page i+1 — index 0
+  // is always null (page 1 needs no cursor). A page's own cursor becomes
+  // known the moment that page's response comes back, which is what lets a
+  // numbered tab for "next page" appear without a separate fetch.
+  let pageCursors = [null];
+  let currentPageNum = 1;
+  let lastHasMore = false;
 
   unlockBtn.addEventListener("click", unlock);
   accessCodeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") unlock(); });
   backBtn.addEventListener("click", () => {
     if (backBtn.dataset.target === "agents") loadAgents();
-    else if (backBtn.dataset.target === "conversations") loadConversations(selectedAgent);
+    else if (backBtn.dataset.target === "conversations") loadConversationsPage(selectedAgent, currentPageNum);
   });
-  exportBtn.addEventListener("click", () => exportAllCalls(currentConversations));
+  exportBtn.addEventListener("click", openExportModal);
+  exportCancelBtn.addEventListener("click", closeExportModal);
+  exportConfirmBtn.addEventListener("click", confirmExport);
+  exportRangeAll.addEventListener("change", updateExportRangeVisibility);
+  exportRangeCustom.addEventListener("change", updateExportRangeVisibility);
+
+  function updateExportRangeVisibility() {
+    exportDateRange.hidden = !exportRangeCustom.checked;
+  }
 
   async function unlock() {
     const code = accessCodeInput.value.trim();
@@ -344,6 +487,7 @@
   function renderAgents(agents) {
     backBtn.hidden = true;
     exportBtn.hidden = true;
+    paginationTabsEl.hidden = true;
     headerSubtitle.textContent = "Select an agent.";
     setStatus(agents.length ? "" : "No agents found.", false);
     contentEl.innerHTML = agents.map((a) => `
@@ -363,22 +507,57 @@
     });
   }
 
+  // Entry point when an agent is (re)selected — resets pagination to page 1.
   async function loadConversations(agent) {
+    pageCursors = [null];
+    await loadConversationsPage(agent, 1);
+  }
+
+  async function loadConversationsPage(agent, pageNum) {
     selectedAgent = agent;
+    currentPageNum = pageNum;
     backBtn.hidden = false;
     backBtn.dataset.target = "agents";
-    headerSubtitle.textContent = `${agent.name} — recent calls`;
+    headerSubtitle.textContent = `${agent.name} — recent calls (page ${pageNum})`;
     setStatus("Loading conversations...", false);
     contentEl.innerHTML = "";
+    paginationTabsEl.hidden = true;
 
-    const result = await apiFetch({ view: "conversations", agentId: agent.id });
+    const params = { view: "conversations", agentId: agent.id };
+    const cursor = pageCursors[pageNum - 1];
+    if (cursor) params.after = cursor;
+
+    const result = await apiFetch(params);
     if (!result.ok) { setStatus(result.error, true); return; }
-    renderConversations(result.data.conversations);
+
+    const { conversations, hasMore, nextCursor } = result.data;
+    lastHasMore = hasMore;
+    if (hasMore && nextCursor && pageCursors.length === pageNum) {
+      pageCursors.push(nextCursor);
+    }
+    renderConversations(conversations);
+    renderPaginationTabs();
+  }
+
+  function renderPaginationTabs() {
+    const maxKnownPage = pageCursors.length;
+    if (maxKnownPage <= 1 && !lastHasMore) {
+      paginationTabsEl.hidden = true;
+      return;
+    }
+    let html = "";
+    for (let p = 1; p <= maxKnownPage; p++) {
+      html += `<button class="page-tab${p === currentPageNum ? " active" : ""}" data-page="${p}">${p}</button>`;
+    }
+    paginationTabsEl.innerHTML = html;
+    paginationTabsEl.hidden = false;
+    paginationTabsEl.querySelectorAll(".page-tab").forEach((btn) => {
+      btn.addEventListener("click", () => loadConversationsPage(selectedAgent, parseInt(btn.dataset.page, 10)));
+    });
   }
 
   function renderConversations(conversations) {
-    currentConversations = conversations;
-    exportBtn.hidden = conversations.length === 0;
+    exportBtn.hidden = conversations.length === 0 && currentPageNum === 1;
     exportBtn.disabled = false;
     exportBtn.textContent = "Export all calls";
     setStatus(conversations.length ? "" : "No conversations found for this agent.", false);
@@ -400,6 +579,7 @@
   async function loadTranscript(conversationId) {
     backBtn.hidden = false;
     exportBtn.hidden = true;
+    paginationTabsEl.hidden = true;
     backBtn.dataset.target = "conversations";
     headerSubtitle.textContent = `${selectedAgent.name} — call transcript`;
     setStatus("Loading transcript...", false);
@@ -456,8 +636,108 @@
   }
 
   const EXPORT_CONCURRENCY = 4;
+  // Safety cap so a huge "All time" export on a long-lived agent can't run
+  // forever — if this is hit, the export still downloads what it found,
+  // but says so rather than silently being incomplete.
+  const MAX_EXPORT_CONVERSATIONS = 1000;
 
-  async function exportAllCalls(conversations) {
+  function openExportModal() {
+    exportRangeAll.checked = true;
+    updateExportRangeVisibility();
+    exportStart.value = "";
+    exportEnd.value = "";
+    exportModalStatus.textContent = "";
+    exportModalStatus.className = "status";
+    exportConfirmBtn.disabled = false;
+    exportConfirmBtn.textContent = "Export";
+    exportModal.hidden = false;
+  }
+
+  function closeExportModal() {
+    exportModal.hidden = true;
+  }
+
+  async function confirmExport() {
+    const allTime = exportRangeAll.checked;
+    let startDate = null;
+    let endDate = null;
+
+    if (!allTime) {
+      if (!exportStart.value || !exportEnd.value) {
+        exportModalStatus.textContent = "Pick both a start and end date.";
+        exportModalStatus.className = "status error";
+        return;
+      }
+      startDate = new Date(exportStart.value + "T00:00:00");
+      endDate = new Date(exportEnd.value + "T23:59:59.999");
+      if (startDate > endDate) {
+        exportModalStatus.textContent = "Start date must be before end date.";
+        exportModalStatus.className = "status error";
+        return;
+      }
+    }
+
+    exportConfirmBtn.disabled = true;
+    exportConfirmBtn.textContent = "Scanning...";
+
+    const { matched, limitReached, error } = await collectConversationsInRange(
+      selectedAgent, startDate, endDate,
+      (scanned) => { exportModalStatus.textContent = `Scanning calls... ${scanned} found so far.`; exportModalStatus.className = "status"; }
+    );
+
+    if (error) {
+      exportModalStatus.textContent = error;
+      exportModalStatus.className = "status error";
+      exportConfirmBtn.disabled = false;
+      exportConfirmBtn.textContent = "Export";
+      return;
+    }
+
+    if (!matched.length) {
+      exportModalStatus.textContent = "No calls found in that range.";
+      exportModalStatus.className = "status error";
+      exportConfirmBtn.disabled = false;
+      exportConfirmBtn.textContent = "Export";
+      return;
+    }
+
+    closeExportModal();
+    const rangeLabel = allTime ? "all-time" : `${exportStart.value}-to-${exportEnd.value}`;
+    await exportAllCalls(matched, rangeLabel, limitReached);
+  }
+
+  // Walks listConversations pages (independent of whatever page is on
+  // screen) collecting every conversation inside [startDate, endDate].
+  // Results come back newest-first, so once an item's createdAt is older
+  // than startDate, everything after it is older too — stop right there
+  // instead of walking the agent's entire history.
+  async function collectConversationsInRange(agent, startDate, endDate, onProgress) {
+    const matched = [];
+    let cursor = undefined;
+    for (let page = 0; ; page++) {
+      const params = { view: "conversations", agentId: agent.id };
+      if (cursor) params.after = cursor;
+      const result = await apiFetch(params);
+      if (!result.ok) return { matched, error: result.error };
+
+      const { conversations, hasMore, nextCursor } = result.data;
+      let stop = false;
+      for (const c of conversations) {
+        const t = new Date(c.createdAt).getTime();
+        if (endDate && t > endDate.getTime()) continue;
+        if (startDate && t < startDate.getTime()) { stop = true; break; }
+        matched.push(c);
+        if (matched.length >= MAX_EXPORT_CONVERSATIONS) { stop = true; break; }
+      }
+      if (onProgress) onProgress(matched.length);
+      if (stop || !hasMore || !nextCursor) {
+        return { matched, limitReached: matched.length >= MAX_EXPORT_CONVERSATIONS };
+      }
+      cursor = nextCursor;
+    }
+  }
+
+  async function exportAllCalls(conversations, rangeLabel, limitReached) {
     if (!conversations.length) return;
 
     exportBtn.disabled = true;
@@ -499,13 +779,14 @@
     await Promise.all(workers);
 
     downloadJson(
-      { agent: selectedAgent.name, exportedAt: new Date().toISOString(), calls: results },
-      `${slugify(selectedAgent.name)}-calls-${new Date().toISOString().slice(0, 10)}.json`
+      { agent: selectedAgent.name, range: rangeLabel, exportedAt: new Date().toISOString(), calls: results },
+      `${slugify(selectedAgent.name)}-calls-${rangeLabel}.json`
     );
 
     exportBtn.disabled = false;
     exportBtn.textContent = "Export all calls";
-    setStatus(`Exported ${done - failed}/${conversations.length} calls${failed ? ` (${failed} failed)` : ""}.`, failed > 0);
+    const limitNote = limitReached ? ` Stopped at the ${MAX_EXPORT_CONVERSATIONS}-call cap — narrow the date range to get the rest.` : "";
+    setStatus(`Exported ${done - failed}/${conversations.length} calls${failed ? ` (${failed} failed)` : ""}.${limitNote}`, failed > 0 || limitReached);
   }
 
   function downloadJson(data, filename) {
