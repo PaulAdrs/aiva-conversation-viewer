@@ -58,7 +58,15 @@ const GET_AUDIT_LOGS = `
 // tool-call name/arguments/result the client actually wants to see.
 const TOOL_EVENTS = new Set(['function_call_received', 'function_call_response_sent']);
 const MAX_AUDIT_PAGES = 10;
-const CONVERSATIONS_PAGE_SIZE = 50;
+// Confirmed empirically (2026-10) that listConversations can hit the same
+// 6MB Lambda ceiling as the audit-log endpoint, and not because any single
+// conversation is huge: fetching conversations one at a time always
+// succeeded, but a batch of 25 failed where a batch of 20 didn't — the
+// resolver evidently assembles full conversation data for the whole
+// requested page before GraphQL trims it down to the fields we asked for,
+// so total page size scales with pageSize regardless of our selection set.
+const CONVERSATIONS_PAGE_SIZE = 20;
+const MIN_CONVERSATIONS_PAGE_SIZE = 5;
 // The admin API runs on AWS Lambda, which hard-caps a single synchronous
 // response at 6 MB. A page of audit-log events can blow past that if any
 // event's payload is large (e.g. a knowledge-base lookup result on a
@@ -77,6 +85,17 @@ function tryParse(str) {
 
 function isPayloadTooLarge(err) {
   return /payload size/i.test(err.message);
+}
+
+async function fetchConversationsPage(agentId, token, pageSize) {
+  try {
+    return await gql(LIST_CONVERSATIONS, { input: { agentId, pageSize } }, token);
+  } catch (err) {
+    if (isPayloadTooLarge(err) && pageSize > MIN_CONVERSATIONS_PAGE_SIZE) {
+      return fetchConversationsPage(agentId, token, Math.max(MIN_CONVERSATIONS_PAGE_SIZE, Math.floor(pageSize / 2)));
+    }
+    throw err;
+  }
 }
 
 async function fetchAuditLogPage(conversationId, token, limit, lastEvaluatedKey) {
@@ -264,7 +283,7 @@ async function handleListConversations(url, env, origin) {
     return jsonResponse({ error: 'Agent is outside the allowed company scope' }, 403, origin);
   }
 
-  const data = await gql(LIST_CONVERSATIONS, { input: { agentId, pageSize: CONVERSATIONS_PAGE_SIZE } }, token);
+  const data = await fetchConversationsPage(agentId, token, CONVERSATIONS_PAGE_SIZE);
   const items = (data.listConversations.items || [])
     .filter((c) => c.agentId === agentId)
     .map((c) => ({
