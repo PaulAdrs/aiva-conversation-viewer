@@ -22,6 +22,11 @@
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   * { box-sizing: border-box; }
+  /* Several elements below set their own `display` (flex, etc.), which at
+     equal CSS specificity beats the browser's default `[hidden]{display:none}`
+     rule since author styles outrank the user-agent stylesheet. Without this,
+     toggling .hidden in JS stops actually hiding anything. */
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     font-family: var(--font-body);
