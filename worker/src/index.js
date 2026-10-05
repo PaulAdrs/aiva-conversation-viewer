@@ -59,6 +59,13 @@ const GET_AUDIT_LOGS = `
 const TOOL_EVENTS = new Set(['function_call_received', 'function_call_response_sent']);
 const MAX_AUDIT_PAGES = 10;
 const CONVERSATIONS_PAGE_SIZE = 50;
+// The admin API runs on AWS Lambda, which hard-caps a single synchronous
+// response at 6 MB. A page of audit-log events can blow past that if any
+// event's payload is large (e.g. a knowledge-base lookup result on a
+// Pinecone-backed agent) — start conservative and back off further on
+// a payload-size error rather than failing the whole transcript.
+const AUDIT_LOG_PAGE_SIZE = 50;
+const MIN_AUDIT_LOG_PAGE_SIZE = 5;
 
 function tryParse(str) {
   try {
@@ -68,16 +75,42 @@ function tryParse(str) {
   }
 }
 
+function isPayloadTooLarge(err) {
+  return /payload size/i.test(err.message);
+}
+
+async function fetchAuditLogPage(conversationId, token, limit, lastEvaluatedKey) {
+  const input = { limit };
+  if (lastEvaluatedKey) input.lastEvaluatedKey = lastEvaluatedKey;
+  try {
+    const data = await gql(GET_AUDIT_LOGS, { conversationId, input }, token);
+    return data.getConversationAuditLogs;
+  } catch (err) {
+    if (isPayloadTooLarge(err) && limit > MIN_AUDIT_LOG_PAGE_SIZE) {
+      return fetchAuditLogPage(conversationId, token, Math.max(MIN_AUDIT_LOG_PAGE_SIZE, Math.floor(limit / 4)), lastEvaluatedKey);
+    }
+    throw err;
+  }
+}
+
+// Returns { events, truncated }. `truncated` means a page still exceeded
+// the payload limit even at the smallest page size — we stop there rather
+// than erroring out, so the caller still gets the tool calls gathered so
+// far (audit events arrive newest-first, so these are the most recent ones).
 async function fetchAllToolCallEvents(conversationId, token) {
   const events = [];
   let lastEvaluatedKey = null;
+  let truncated = false;
 
   for (let page = 0; page < MAX_AUDIT_PAGES; page++) {
-    const input = { limit: 200 };
-    if (lastEvaluatedKey) input.lastEvaluatedKey = lastEvaluatedKey;
-
-    const data = await gql(GET_AUDIT_LOGS, { conversationId, input }, token);
-    const result = data.getConversationAuditLogs;
+    let result;
+    try {
+      result = await fetchAuditLogPage(conversationId, token, AUDIT_LOG_PAGE_SIZE, lastEvaluatedKey);
+    } catch (err) {
+      if (!isPayloadTooLarge(err)) throw err;
+      truncated = true;
+      break;
+    }
 
     for (const item of result.items) {
       if (TOOL_EVENTS.has(item.event)) events.push(item);
@@ -87,7 +120,7 @@ async function fetchAllToolCallEvents(conversationId, token) {
     if (!lastEvaluatedKey) break;
   }
 
-  return events;
+  return { events, truncated };
 }
 
 function pairToolCalls(events) {
@@ -273,13 +306,14 @@ async function handleGetConversation(url, env, origin) {
   // richer paired tool-call data below).
   const messages = conversation.messages.filter((m) => m.role === 'user' || m.role === 'assistant');
 
-  const toolEvents = await fetchAllToolCallEvents(conversation.id, token);
+  const { events: toolEvents, truncated } = await fetchAllToolCallEvents(conversation.id, token);
   const toolCalls = pairToolCalls(toolEvents);
 
   return jsonResponse(
     {
       conversation: { ...conversation, messages },
       toolCalls,
+      toolCallsTruncated: truncated,
     },
     200,
     origin

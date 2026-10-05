@@ -407,9 +407,13 @@
 
     const result = await apiFetch({ conversationId });
     if (!result.ok) { setStatus(result.error, true); return; }
-    const { conversation, toolCalls } = result.data;
+    const { conversation, toolCalls, toolCallsTruncated } = result.data;
     renderTimeline(conversation, toolCalls);
-    setStatus(`Loaded ${conversation.messages.length} messages and ${toolCalls.length} tool calls.`, false);
+    const base = `Loaded ${conversation.messages.length} messages and ${toolCalls.length} tool calls.`;
+    const warning = toolCallsTruncated
+      ? " Some older tool-call logs on this call were too large to load and were left out."
+      : "";
+    setStatus(base + warning, toolCallsTruncated);
   }
 
   function renderTimeline(conversation, toolCalls) {
@@ -480,6 +484,7 @@
             status: summary.status,
             conversation: result.data.conversation,
             toolCalls: result.data.toolCalls,
+            toolCallsTruncated: result.data.toolCallsTruncated,
           };
         } else {
           failed++;
