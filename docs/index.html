@@ -254,6 +254,16 @@
     cursor: pointer;
   }
   .page-tab:hover { border-color: var(--surface-brand); }
+  .page-tab:disabled { opacity: 0.4; cursor: default; }
+  .page-tab:disabled:hover { border-color: var(--border); }
+  .page-ellipsis {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 2px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
   .page-tab.active {
     background: var(--surface-brand);
     border-color: var(--surface-brand);
@@ -410,10 +420,13 @@
   // Pagination state for the conversations list currently on screen.
   // pageCursors[i] is the "after" cursor needed to fetch page i+1 — index 0
   // is always null (page 1 needs no cursor). A page's own cursor becomes
-  // known the moment that page's response comes back, which is what lets a
-  // numbered tab for "next page" appear without a separate fetch.
+  // known the moment that page's response comes back, but `visitedPages`
+  // (not pageCursors.length) is what drives the number tabs, so a new page
+  // number only ever shows up once you've actually navigated to it via
+  // Next — not the instant its cursor becomes available.
   let pageCursors = [null];
   let currentPageNum = 1;
+  let visitedPages = 1;
   let lastHasMore = false;
 
   unlockBtn.addEventListener("click", unlock);
@@ -515,6 +528,7 @@
   // Entry point when an agent is (re)selected — resets pagination to page 1.
   async function loadConversations(agent) {
     pageCursors = [null];
+    visitedPages = 1;
     await loadConversationsPage(agent, 1);
   }
 
@@ -540,25 +554,45 @@
     if (hasMore && nextCursor && pageCursors.length === pageNum) {
       pageCursors.push(nextCursor);
     }
+    visitedPages = Math.max(visitedPages, pageNum);
     renderConversations(conversations);
     renderPaginationTabs();
   }
 
+  // Which page numbers to actually render as tabs, collapsing with "..."
+  // once there are more than a handful — classic `1 2 ... 8 9` pager shape.
+  function computePageList(current, maxPage) {
+    if (maxPage <= 7) return Array.from({ length: maxPage }, (_, i) => i + 1);
+    const keep = new Set([1, 2, maxPage - 1, maxPage, current - 1, current, current + 1]);
+    return [...keep].filter((p) => p >= 1 && p <= maxPage).sort((a, b) => a - b);
+  }
+
   function renderPaginationTabs() {
-    const maxKnownPage = pageCursors.length;
-    if (maxKnownPage <= 1 && !lastHasMore) {
+    if (visitedPages <= 1 && !lastHasMore) {
       paginationTabsEl.hidden = true;
       return;
     }
-    let html = "";
-    for (let p = 1; p <= maxKnownPage; p++) {
+
+    const pages = computePageList(currentPageNum, visitedPages);
+    let html = `<button class="page-tab" id="pagePrev" ${currentPageNum === 1 ? "disabled" : ""}>&lt;</button>`;
+    let prev = 0;
+    for (const p of pages) {
+      if (p - prev > 1) html += `<span class="page-ellipsis">...</span>`;
       html += `<button class="page-tab${p === currentPageNum ? " active" : ""}" data-page="${p}">${p}</button>`;
+      prev = p;
     }
+    const canGoNext = currentPageNum < visitedPages || (currentPageNum === visitedPages && lastHasMore);
+    html += `<button class="page-tab" id="pageNext" ${canGoNext ? "" : "disabled"}>&gt;</button>`;
+
     paginationTabsEl.innerHTML = html;
     paginationTabsEl.hidden = false;
-    paginationTabsEl.querySelectorAll(".page-tab").forEach((btn) => {
+    paginationTabsEl.querySelectorAll(".page-tab[data-page]").forEach((btn) => {
       btn.addEventListener("click", () => loadConversationsPage(selectedAgent, parseInt(btn.dataset.page, 10)));
     });
+    const prevBtn = document.getElementById("pagePrev");
+    const nextBtn = document.getElementById("pageNext");
+    if (!prevBtn.disabled) prevBtn.addEventListener("click", () => loadConversationsPage(selectedAgent, currentPageNum - 1));
+    if (!nextBtn.disabled) nextBtn.addEventListener("click", () => loadConversationsPage(selectedAgent, currentPageNum + 1));
   }
 
   function renderConversations(conversations) {
